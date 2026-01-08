@@ -48,12 +48,49 @@ export default function App() {
     checkScrapeStatus();
   }, []);
 
+  // Transform API tender to frontend format
+  const transformApiTender = (apiTender: any): Tender => {
+    return {
+      id: apiTender.id,
+      quotationNumber: apiTender.quotation_number || apiTender.quotationNumber || '',
+      category: {
+        code: apiTender.category_code || '',
+        name: apiTender.category_name || 'Unknown Category',
+      },
+      summary: apiTender.summary || '',
+      description: apiTender.description || apiTender.summary || '',
+      amount: apiTender.amount || 0,
+      ministry: {
+        name: apiTender.ministry_name || 'Unknown Ministry',
+        department: apiTender.ministry_department || '',
+        contact: apiTender.ministry_contact || '',
+        phone: apiTender.ministry_phone || '',
+        location: apiTender.ministry_location || '',
+      },
+      dates: {
+        published: apiTender.date_published ? new Date(apiTender.date_published) : new Date(),
+        closing: apiTender.date_closing ? new Date(apiTender.date_closing) : new Date(),
+        briefing: apiTender.date_briefing ? new Date(apiTender.date_briefing) : undefined,
+      },
+      tags: apiTender.tags || [],
+      status: apiTender.status || 'available',
+      isUrgent: apiTender.is_urgent || false,
+      documents: [],
+      budgetCode: apiTender.budget_code,
+      paymentTerms: apiTender.payment_terms,
+      notes: apiTender.notes,
+      activityHistory: [],
+    };
+  };
+
   const fetchTenders = async () => {
     try {
       setIsLoading(true);
       const response = await api.getTenders();
       if (response.success) {
-        setTenders(response.tenders);
+        // Transform API data to frontend format
+        const transformedTenders = response.tenders.map(transformApiTender);
+        setTenders(transformedTenders);
       }
     } catch (error) {
       console.error('Error fetching tenders:', error);
