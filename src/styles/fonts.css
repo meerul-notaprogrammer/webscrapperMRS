@@ -1,0 +1,7 @@
+/* Segoe UI is the default system font on Windows, used by Microsoft Fluent Design */
+/* No need to import as it's available system-wide on Windows */
+/* Fallback to system fonts on other platforms */
+
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+}

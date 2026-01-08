@@ -1,0 +1,208 @@
+"""
+ePerolehan Web Scraper using Playwright
+Scrapes tender data from ePerolehan portal
+"""
+import os
+import json
+import re
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from playwright.async_api import async_playwright, Page, Browser
+from bs4 import BeautifulSoup
+from loguru import logger
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class EPerolehanScraper:
+    def __init__(self):
+        self.base_url = os.getenv("EPEROLEHAN_BASE_URL", "https://eperolehan.treasury.gov.my")
+        self.search_url = os.getenv("EPEROLEHAN_SEARCH_URL", f"{self.base_url}/ePerolehan/supplier/searchquotation.do")
+        self.headless = os.getenv("HEADLESS_BROWSER", "true").lower() == "true"
+        self.timeout = int(os.getenv("PAGE_TIMEOUT", "30000"))
+        self.category_codes = os.getenv("CATEGORY_CODES", "").split(",")
+        
+        # Parse TAG_KEYWORDS with error handling
+        try:
+            tag_keywords_str = os.getenv("TAG_KEYWORDS", "{}")
+            self.tag_keywords = json.loads(tag_keywords_str)
+        tenders = []
+        
+        # Find tender table (adjust selectors based on actual ePerolehan structure)
+        # This is a TEMPLATE - you'll need to inspect the actual page structure
+        rows = soup.select('table.quotationList tr')[1:]  # Skip header
+        
+        for row in rows:
+            try:
+                cols = row.find_all('td')
+                if len(cols) < 5:
+                    continue
+                
+                quotation_number = cols[0].get_text(strip=True)
+                summary = cols[1].get_text(strip=True)
+                ministry = cols[2].get_text(strip=True)
+                closing_date_str = cols[3].get_text(strip=True)
+                amount_str = cols[4].get_text(strip=True)
+                
+                # Parse closing date
+                closing_date = self._parse_date(closing_date_str)
+                
+                # Parse amount
+                amount = self._parse_amount(amount_str)
+                
+                # Calculate days remaining
+                days_remaining = (closing_date - datetime.now()).days if closing_date else 0
+                is_urgent = days_remaining < 7
+                
+                # Auto-tag
+                tags = self._auto_tag(summary)
+                
+                tender = {
+                    "quotation_number": quotation_number,
+                    "category_code": category_code,
+                    "summary": summary,
+                    "ministry_name": ministry,
+                    "date_closing": closing_date.isoformat() if closing_date else None,
+                    "days_remaining": days_remaining,
+                    "is_urgent": is_urgent,
+                    "amount": amount,
+                    "tags": tags,
+                    "status": "available",
+                    "scraped_at": datetime.now().isoformat()
+                }
+                
+                tenders.append(tender)
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing tender row: {e}")
+                continue
+        
+        return tenders
+    
+    def _get_tender_details(self, page: Page, quotation_number: str) -> Dict[str, Any]:
+        """Get detailed information for a tender (sync)"""
+        details = {}
+        
+        try:
+            # Click on tender to view details (adjust selector)
+            page.click(f'a[href*="{quotation_number}"]')
+            page.wait_for_load_state("networkidle")
+            
+            content = page.content()
+            soup = BeautifulSoup(content, 'lxml')
+            
+            # Extract detailed information (adjust selectors)
+            desc_elem = soup.select_one('.tenderDescription')
+            details["description"] = desc_elem.get_text(strip=True) if desc_elem else ""
+            
+            dept_elem = soup.select_one('.department')
+            details["ministry_department"] = dept_elem.get_text(strip=True) if dept_elem else ""
+            
+            contact_elem = soup.select_one('.contactEmail')
+            details["ministry_contact"] = contact_elem.get_text(strip=True) if contact_elem else ""
+            
+            phone_elem = soup.select_one('.contactPhone')
+            details["ministry_phone"] = phone_elem.get_text(strip=True) if phone_elem else ""
+            
+            loc_elem = soup.select_one('.location')
+            details["ministry_location"] = loc_elem.get_text(strip=True) if loc_elem else ""
+            
+            # Extract documents
+            doc_links = soup.select('.documentList a')
+            documents = []
+            for link in doc_links:
+                documents.append({
+                    "name": link.get_text(strip=True),
+                    "url": self.base_url + link.get('href', ''),
+                    "size": "Unknown"
+                })
+            details["documents"] = documents
+            
+            # Go back to list
+            page.go_back()
+            page.wait_for_load_state("networkidle")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error getting tender details: {e}")
+        
+        return details
+    
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Parse date string to datetime"""
+        try:
+            # Try common Malaysian date formats
+            formats = [
+                "%d/%m/%Y",
+                "%d-%m-%Y",
+                "%Y-%m-%d",
+                "%d %b %Y",
+                "%d %B %Y"
+            ]
+            
+            for fmt in formats:
+                try:
+                    return datetime.strptime(date_str.strip(), fmt)
+                except:
+                    continue
+            
+            logger.warning(f"⚠️ Could not parse date: {date_str}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Date parsing error: {e}")
+            return None
+    
+    def _parse_amount(self, amount_str: str) -> Optional[float]:
+        """Parse amount string to float"""
+        try:
+            # Remove RM, commas, spaces
+            clean = re.sub(r'[RM,\s]', '', amount_str)
+            return float(clean)
+        except:
+            return None
+    
+    def _auto_tag(self, text: str) -> List[str]:
+        """Auto-tag tender based on keywords"""
+        tags = []
+        text_lower = text.lower()
+        
+        for tag, keywords in self.tag_keywords.items():
+            if any(keyword.lower() in text_lower for keyword in keywords):
+                tags.append(tag)
+        
+        return tags
+    
+    async def scrape_single_tender(self, quotation_number: str) -> Optional[Dict[str, Any]]:
+        """Scrape a single tender by quotation number (async wrapper)"""
+        import asyncio
+        return await asyncio.to_thread(self._scrape_single_tender_sync, quotation_number)
+    
+    def _scrape_single_tender_sync(self, quotation_number: str) -> Optional[Dict[str, Any]]:
+        """Sync version of scrape_single_tender"""
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=self.headless)
+            page = browser.new_page()
+            
+            try:
+                page.goto(self.search_url, timeout=self.timeout)
+                page.fill('input[name="quotationNumber"]', quotation_number)
+                page.click('input[type="submit"]')
+                page.wait_for_load_state("networkidle")
+                
+                content = page.content()
+                tenders = self._parse_tender_list(content, "")
+                
+                if tenders:
+                    tender = tenders[0]
+                    details = self._get_tender_details(page, quotation_number)
+                    tender.update(details)
+                    return tender
+                
+            except Exception as e:
+                logger.error(f"❌ Error scraping tender {quotation_number}: {e}")
+            finally:
+                browser.close()
+        
+        return None
+
+# Singleton instance
+scraper = EPerolehanScraper()
