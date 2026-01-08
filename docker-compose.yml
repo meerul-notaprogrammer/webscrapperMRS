@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # Backend API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eperolehan-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env
+    volumes:
+      - ./backend:/app/backend
+      - playwright-cache:/root/.cache/ms-playwright
+    networks:
+      - eperolehan-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Scheduler Service
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eperolehan-scheduler
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    volumes:
+      - ./backend:/app/backend
+      - playwright-cache:/root/.cache/ms-playwright
+    command: [ "python", "scheduler_service.py" ]
+    networks:
+      - eperolehan-network
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: eperolehan-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./dist:/usr/share/nginx/html:ro
+    networks:
+      - eperolehan-network
+    depends_on:
+      - api
+
+volumes:
+  playwright-cache:
+    driver: local
+
+networks:
+  eperolehan-network:
+    driver: bridge
