@@ -33,6 +33,12 @@ export interface Tender {
   budgetCode?: string;
   paymentTerms?: string;
   notes?: string;
+  fieldCodes?: string[];
+  contactDetails?: {
+    name: string;
+    phone: string;
+    email?: string;
+  }[];
   activityHistory: {
     action: string;
     timestamp: Date;

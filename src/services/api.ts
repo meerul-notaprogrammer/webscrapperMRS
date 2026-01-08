@@ -32,6 +32,12 @@ export interface Tender {
   notes?: string;
   scraped_at: string;
   updated_at: string;
+  field_codes?: string[];
+  contact_details?: {
+    name: string;
+    phone: string;
+    email?: string;
+  }[];
 }
 
 export interface TenderDocument {

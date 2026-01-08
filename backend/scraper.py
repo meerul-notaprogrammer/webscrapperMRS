@@ -223,17 +223,19 @@ class EPerolehanScraper:
         """
         Navigate to detail page and extract comprehensive information
         
-        Returns dict with: description, amount, contacts, documents
+        Returns dict with: description, amount, contacts, documents, field_codes, location
         """
         detail = {
             'description': None,
-            'amount': None,
+            'amount': 0.0,
             'ministry_department': None,
             'ministry_contact': None,
             'ministry_phone': None,
             'ministry_email': None,
-            'ministry_address': None,
-            'documents': []
+            'ministry_location': None,
+            'documents': [],
+            'field_codes': [],
+            'contact_details': []
         }
         
         try:
@@ -247,24 +249,42 @@ class EPerolehanScraper:
             soup = BeautifulSoup(content, 'lxml')
             
             # Extract amount (Jumlah Harga Indikatif)
-            detail['amount'] = self._extract_labeled_value(soup, 
+            amount_str = self._extract_labeled_value(soup, 
                 ['Jumlah Harga Indikatif', 'Harga Indikatif', 'Anggaran Harga'])
+            if amount_str:
+                # Clean amount string (remove RM, commas)
+                clean_amount = re.sub(r'[^\d.]', '', amount_str)
+                try:
+                    detail['amount'] = float(clean_amount)
+                except:
+                    detail['amount'] = 0.0
             
             # Extract description
             detail['description'] = self._extract_labeled_value(soup, 
                 ['Tajuk Perolehan', 'Perihal', 'Keterangan'])
             
             # Extract ministry details
-            detail['ministry_department'] = self._extract_labeled_value(soup, ['PTJ'])
+            detail['ministry_department'] = self._extract_labeled_value(soup, ['PTJ', 'Bahagian'])
             
-            # Extract contact info from PEGAWAI UNTUK DIHUBUNGI section
+            # Extract Location (Lokaliti Liputan) - Optional
+            detail['ministry_location'] = self._extract_labeled_value(soup, 
+                ['Lokaliti Liputan', 'Lokasi Liputan', 'Lokasi'])
+            
+            # Extract Field Codes (Kod Bidang) - Take ALL
+            detail['field_codes'] = self._extract_field_codes(soup)
+            
+            # Extract contact info from PEGAWAI UNTUK DIHUBUNGI section - Take ALL
             contacts = self._extract_contacts(soup)
-            if contacts:
-                detail['ministry_contact'] = contacts.get('name')
-                detail['ministry_phone'] = contacts.get('phone')
-                detail['ministry_email'] = contacts.get('email')
+            detail['contact_details'] = contacts
             
-            # Extract documents from SENARAI DOKUMEN section
+            # Set primary contact for backward compatibility
+            if contacts:
+                primary = contacts[0]
+                detail['ministry_contact'] = primary.get('name')
+                detail['ministry_phone'] = primary.get('phone')
+                detail['ministry_email'] = primary.get('email')
+            
+            # Extract documents from SENARAI DOKUMEN section - Take ALL
             detail['documents'] = self._extract_documents(soup)
             
             # Go back to list
@@ -276,31 +296,31 @@ class EPerolehanScraper:
         
         return detail
     
-    def _extract_labeled_value(self, soup: BeautifulSoup, labels: List[str]) -> Optional[str]:
-        """Extract value from a label: value pair in the page"""
-        for label in labels:
-            # Try finding in table rows
-            for row in soup.find_all('tr'):
-                cells = row.find_all(['td', 'th'])
-                for i, cell in enumerate(cells):
-                    if label.lower() in cell.get_text(strip=True).lower():
-                        # Get next cell as value
-                        if i + 1 < len(cells):
-                            value = cells[i + 1].get_text(strip=True)
-                            return value if value else None
-            
-            # Try finding in definition lists or divs
-            label_elem = soup.find(['dt', 'label', 'th', 'td'], string=re.compile(label, re.I))
-            if label_elem:
-                value_elem = label_elem.find_next(['dd', 'span', 'td', 'p'])
-                if value_elem:
-                    return value_elem.get_text(strip=True)
+    def _extract_field_codes(self, soup: BeautifulSoup) -> List[str]:
+        """Extract all Kod Bidang from the table"""
+        codes = []
         
-        return None
-    
-    def _extract_contacts(self, soup: BeautifulSoup) -> Optional[Dict[str, str]]:
-        """Extract contact information from PEGAWAI UNTUK DIHUBUNGI section"""
-        contact = {}
+        # Find header for Kod Bidang
+        header = soup.find(['h4', 'h5', 'div', 'strong'], string=re.compile('Kod Bidang', re.I))
+        if header:
+            # Find the table
+            table = header.find_next('table')
+            if table:
+                rows = table.find_all('tr')
+                # Skip header row (usually contains "Kod Bidang", "Bidang", etc.)
+                for row in rows[1:]:
+                    cells = row.find_all('td')
+                    if cells and len(cells) > 0:
+                        code = cells[0].get_text(strip=True)
+                        desc = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                        if code:
+                            codes.append(f"{code} - {desc}")
+        
+        return codes
+
+    def _extract_contacts(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        """Extract all contacts from PEGAWAI UNTUK DIHUBUNGI section"""
+        contacts = []
         
         # Find the contact section
         section_header = soup.find(['h4', 'h5', 'div'], string=re.compile('PEGAWAI UNTUK DIHUBUNGI', re.I))
@@ -312,23 +332,27 @@ class EPerolehanScraper:
             table = section_header.find_next('table')
             if table:
                 rows = table.find_all('tr')
-                if len(rows) > 1:  # Skip header row
-                    first_contact = rows[1].find_all('td')
-                    if first_contact:
-                        if len(first_contact) > 0:
-                            contact['name'] = first_contact[0].get_text(strip=True)
-                        if len(first_contact) > 1:
-                            contact['phone'] = first_contact[1].get_text(strip=True)
-                        if len(first_contact) > 3:
-                            # Email might be in 4th column
-                            email_cell = first_contact[3] if len(first_contact) > 3 else first_contact[-1]
-                            email_link = email_cell.find('a')
+                # Skip header row
+                for row in rows[1:]:
+                    cells = row.find_all('td')
+                    if len(cells) >= 2: # At least name and phone
+                        contact = {}
+                        contact['name'] = cells[0].get_text(strip=True)
+                        contact['phone'] = cells[1].get_text(strip=True)
+                        
+                        # Email usually in last column or 4th
+                        if len(cells) > 2:
+                             # Check for mailto link
+                            email_link = row.find('a', href=re.compile('mailto:'))
                             if email_link:
                                 contact['email'] = email_link.get_text(strip=True)
                             else:
-                                contact['email'] = email_cell.get_text(strip=True)
+                                # Try last column
+                                contact['email'] = cells[-1].get_text(strip=True)
+                        
+                        contacts.append(contact)
         
-        return contact if contact else None
+        return contacts
     
     def _extract_documents(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
         """Extract document links from SENARAI DOKUMEN section"""
@@ -447,6 +471,8 @@ class EPerolehanScraper:
                     "ministry_phone": "",
                     "ministry_email": "",
                     "ministry_location": "",
+                    "field_codes": [],
+                    "contact_details": [],
                     "date_iklan": date_iklan.isoformat() if date_iklan else None,
                     "date_published": date_iklan.isoformat() if date_iklan else None,
                     "date_closing": date_tutup.isoformat() if date_tutup else None,

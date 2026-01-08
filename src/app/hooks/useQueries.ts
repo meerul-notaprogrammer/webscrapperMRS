@@ -54,6 +54,8 @@ export const transformApiTender = (apiTender: any): Tender => {
         budgetCode: apiTender.budget_code,
         paymentTerms: apiTender.payment_terms,
         notes: apiTender.notes,
+        fieldCodes: apiTender.field_codes || [],
+        contactDetails: apiTender.contact_details || [],
         activityHistory: [],
     };
 };
