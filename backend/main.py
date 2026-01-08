@@ -224,7 +224,7 @@ async def scrape_history(limit: int = 10):
 async def get_categories():
     """Get all categories"""
     try:
-        categories = await db.get_enabled_categories()
+        categories = await db.get_all_categories()
         return {
             "success": True,
             "count": len(categories),

@@ -1,17 +1,37 @@
+/**
+ * ePerolehan Monitor - Main Application
+ * 
+ * Uses TanStack Query for:
+ * - Server state management
+ * - Auto-refresh every 5 minutes
+ * - Optimistic updates for status changes
+ * - Caching and deduplication
+ */
+
 import { useState, useEffect } from 'react';
+import { QueryClientProvider, QueryClient } from '@tanstack/react-query';
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { ThemeProvider } from 'next-themes';
 import { Toaster, toast } from 'sonner';
-import { Menu, RefreshCw, Moon, Sun, User, Settings, BarChart3 } from 'lucide-react';
+import { Menu, RefreshCw, Moon, Sun, User, Settings, BarChart3, Loader2 } from 'lucide-react';
 import { StatisticsCard } from './components/StatisticsCard';
 import { TenderCard } from './components/TenderCard';
 import { TenderDetailSidebar } from './components/TenderDetailSidebar';
 import { SearchFilterBar } from './components/SearchFilterBar';
 import { SettingsPage } from './components/SettingsPage';
 import { AnalyticsPage } from './components/AnalyticsPage';
+import { ScrapeProgressDialog } from './components/ScrapeProgressDialog';
 import { Button } from './components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './components/ui/tabs';
 import { Tender, TenderStatus } from './data/mockTenders';
-import api from '../services/api';
+import {
+  useTenders,
+  useStats,
+  useCategories,
+  useScrapeStatus,
+  useUpdateTenderStatus,
+  useTriggerScrape
+} from './hooks/useQueries';
 import {
   FileText,
   CheckCircle2,
@@ -25,103 +45,44 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu';
 
+// Create Query Client
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 1000 * 60,
+      gcTime: 1000 * 60 * 10,
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
+
 type Page = 'dashboard' | 'settings' | 'analytics';
 
-export default function App() {
-  const [tenders, setTenders] = useState<Tender[]>([]);
-  const [stats, setStats] = useState({ available: 0, accepted: 0, onhold: 0, removed: 0, urgent: 0, total: 0 });
+function AppContent() {
   const [activeTab, setActiveTab] = useState<TenderStatus>('available');
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [isScraping, setIsScraping] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
-  const [lastScrape, setLastScrape] = useState<Date | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [showScrapeDialog, setShowScrapeDialog] = useState(false);
 
-  // Fetch tenders from API
-  useEffect(() => {
-    fetchTenders();
-    fetchStats();
-    checkScrapeStatus();
-  }, []);
+  // TanStack Query hooks
+  const { data: tenders = [], isLoading: tendersLoading, refetch: refetchTenders } = useTenders();
+  const { data: stats = { available: 0, accepted: 0, onhold: 0, removed: 0, urgent: 0, total: 0 } } = useStats();
+  const { data: categories = [] } = useCategories();
+  const { data: scrapeStatus } = useScrapeStatus(showScrapeDialog);
 
-  // Transform API tender to frontend format
-  const transformApiTender = (apiTender: any): Tender => {
-    return {
-      id: apiTender.id,
-      quotationNumber: apiTender.quotation_number || apiTender.quotationNumber || '',
-      category: {
-        code: apiTender.category_code || '',
-        name: apiTender.category_name || 'Unknown Category',
-      },
-      summary: apiTender.summary || '',
-      description: apiTender.description || apiTender.summary || '',
-      amount: apiTender.amount || 0,
-      ministry: {
-        name: apiTender.ministry_name || 'Unknown Ministry',
-        department: apiTender.ministry_department || '',
-        contact: apiTender.ministry_contact || '',
-        phone: apiTender.ministry_phone || '',
-        location: apiTender.ministry_location || '',
-      },
-      dates: {
-        published: apiTender.date_published ? new Date(apiTender.date_published) : new Date(),
-        closing: apiTender.date_closing ? new Date(apiTender.date_closing) : new Date(),
-        briefing: apiTender.date_briefing ? new Date(apiTender.date_briefing) : undefined,
-      },
-      tags: apiTender.tags || [],
-      status: apiTender.status || 'available',
-      isUrgent: apiTender.is_urgent || false,
-      documents: [],
-      budgetCode: apiTender.budget_code,
-      paymentTerms: apiTender.payment_terms,
-      notes: apiTender.notes,
-      activityHistory: [],
-    };
-  };
+  const updateStatusMutation = useUpdateTenderStatus();
+  const triggerScrapeMutation = useTriggerScrape();
 
-  const fetchTenders = async () => {
-    try {
-      setIsLoading(true);
-      const response = await api.getTenders();
-      if (response.success) {
-        // Transform API data to frontend format
-        const transformedTenders = response.tenders.map(transformApiTender);
-        setTenders(transformedTenders);
-      }
-    } catch (error) {
-      console.error('Error fetching tenders:', error);
-      toast.error('Failed to load tenders');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchStats = async () => {
-    try {
-      const response = await api.getStats();
-      if (response.success) {
-        setStats(response.stats);
-      }
-    } catch (error) {
-      console.error('Error fetching stats:', error);
-    }
-  };
-
-  const checkScrapeStatus = async () => {
-    try {
-      const response = await api.getScrapeStatus();
-      if (response.success && response.last_scrape) {
-        setLastScrape(new Date(response.last_scrape.scrape_time));
-        setIsScraping(response.is_running);
-      }
-    } catch (error) {
-      console.error('Error checking scrape status:', error);
-    }
-  };
+  // Check if scraping is in progress
+  const isScraping = scrapeStatus?.is_running || triggerScrapeMutation.isPending;
+  const lastScrape = scrapeStatus?.last_scrape?.scrape_time
+    ? new Date(scrapeStatus.last_scrape.scrape_time)
+    : null;
 
   useEffect(() => {
     // Apply theme to document
@@ -137,64 +98,31 @@ export default function App() {
   };
 
   const handleScrape = async () => {
-    setIsScraping(true);
-    toast.info('🔄 Scraping in progress... This may take a few minutes');
+    setShowScrapeDialog(true);
 
     try {
-      const response = await api.triggerScrape();
-      if (response.success) {
-        toast.success('✓ Scraping started successfully!');
-
-        // Poll for completion
-        const pollInterval = setInterval(async () => {
-          const status = await api.getScrapeStatus();
-          if (!status.is_running) {
-            clearInterval(pollInterval);
-            setIsScraping(false);
-            setLastScrape(new Date());
-            await fetchTenders();
-            await fetchStats();
-            toast.success('✓ Scraping completed! Check the tenders.');
-          }
-        }, 5000); // Check every 5 seconds
-      } else {
-        toast.error('Failed to start scraping');
-        setIsScraping(false);
-      }
+      await triggerScrapeMutation.mutateAsync();
+      toast.success('✓ Scraping started successfully!');
     } catch (error) {
-      console.error('Error triggering scrape:', error);
       toast.error('Failed to start scraping');
-      setIsScraping(false);
+      setShowScrapeDialog(false);
     }
   };
 
   const handleStatusChange = async (tender: Tender, newStatus: TenderStatus) => {
     try {
-      const response = await api.updateTender(tender.quotationNumber, { status: newStatus });
-      if (response.success) {
-        // Update local state
-        setTenders(prev =>
-          prev.map(t =>
-            t.quotationNumber === tender.quotationNumber
-              ? { ...t, status: newStatus }
-              : t
-          )
-        );
+      await updateStatusMutation.mutateAsync({
+        quotationNumber: tender.quotationNumber,
+        status: newStatus,
+      });
 
-        // Update selected tender if it's the one being changed
-        if (selectedTender?.quotationNumber === tender.quotationNumber) {
-          setSelectedTender({ ...selectedTender, status: newStatus });
-        }
-
-        // Refresh stats
-        await fetchStats();
-
-        toast.success(`✓ Tender ${newStatus}`);
-      } else {
-        toast.error('Failed to update tender status');
+      // Update selected tender if it's the one being changed
+      if (selectedTender?.quotationNumber === tender.quotationNumber) {
+        setSelectedTender({ ...selectedTender, status: newStatus });
       }
+
+      toast.success(`✓ Tender ${newStatus}`);
     } catch (error) {
-      console.error('Error updating tender:', error);
       toast.error('Failed to update tender status');
     }
   };
@@ -212,6 +140,7 @@ export default function App() {
     setSearchQuery('');
   };
 
+  // Filter tenders based on status, search, and categories
   const filteredTenders = tenders.filter(tender => {
     // Filter by status tab
     if (tender.status !== activeTab) return false;
@@ -312,7 +241,11 @@ export default function App() {
                   disabled={isScraping}
                   className="bg-primary hover:bg-primary-dark text-primary-foreground"
                 >
-                  <RefreshCw className={`h-4 w-4 mr-2 ${isScraping ? 'animate-spin' : ''}`} />
+                  {isScraping ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                  )}
                   {isScraping ? 'Scraping...' : 'Refresh Tenders'}
                 </Button>
 
@@ -372,7 +305,7 @@ export default function App() {
               icon={FileText}
               count={stats.available}
               label="Available"
-              trend={{ value: 3, label: 'today' }}
+              trend={{ value: stats.urgent, label: 'urgent' }}
               variant="primary"
               delay={0}
             />
@@ -380,7 +313,6 @@ export default function App() {
               icon={CheckCircle2}
               count={stats.accepted}
               label="Accepted"
-              trend={{ value: 2, label: 'today' }}
               variant="success"
               delay={0.05}
             />
@@ -388,7 +320,6 @@ export default function App() {
               icon={PauseCircle}
               count={stats.onhold}
               label="On Hold"
-              trend={{ value: 1, label: 'today' }}
               variant="warning"
               delay={0.1}
             />
@@ -396,7 +327,6 @@ export default function App() {
               icon={XCircle}
               count={stats.removed}
               label="Removed"
-              trend={{ value: -1, label: 'today' }}
               variant="danger"
               delay={0.15}
             />
@@ -410,6 +340,7 @@ export default function App() {
               selectedCategories={selectedCategories}
               onCategoryToggle={handleCategoryToggle}
               onClearFilters={handleClearFilters}
+              categories={categories}
             />
           </div>
 
@@ -431,7 +362,12 @@ export default function App() {
             </TabsList>
 
             <TabsContent value={activeTab} className="space-y-4">
-              {filteredTenders.length === 0 ? (
+              {tendersLoading ? (
+                <div className="text-center py-16">
+                  <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4 text-primary" />
+                  <p className="text-muted-foreground">Loading tenders...</p>
+                </div>
+              ) : filteredTenders.length === 0 ? (
                 <div className="text-center py-16">
                   <div className="text-6xl mb-4">
                     {searchQuery || selectedCategories.length > 0 ? '🔍' : '📋'}
@@ -490,8 +426,27 @@ export default function App() {
           onRemove={(t) => handleStatusChange(t, 'removed')}
         />
 
+        {/* Scrape Progress Dialog */}
+        <ScrapeProgressDialog
+          isOpen={showScrapeDialog}
+          onClose={() => {
+            setShowScrapeDialog(false);
+            refetchTenders();
+          }}
+          status={scrapeStatus}
+        />
+
         <Toaster position="top-right" />
       </div>
     </ThemeProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AppContent />
+      <ReactQueryDevtools initialIsOpen={false} />
+    </QueryClientProvider>
   );
 }

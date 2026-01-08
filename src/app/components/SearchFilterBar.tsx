@@ -8,7 +8,13 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { categories } from '../data/mockTenders';
+import { categories as defaultCategories } from '../data/mockTenders';
+
+interface Category {
+  code: string;
+  name: string;
+  enabled?: boolean;
+}
 
 interface SearchFilterBarProps {
   searchQuery: string;
@@ -16,6 +22,7 @@ interface SearchFilterBarProps {
   selectedCategories: string[];
   onCategoryToggle: (code: string) => void;
   onClearFilters: () => void;
+  categories?: Category[];
 }
 
 export function SearchFilterBar({
@@ -24,6 +31,7 @@ export function SearchFilterBar({
   selectedCategories,
   onCategoryToggle,
   onClearFilters,
+  categories = defaultCategories,
 }: SearchFilterBarProps) {
   return (
     <div className="space-y-4">
@@ -39,7 +47,7 @@ export function SearchFilterBar({
             className="pl-10 bg-input-background border-border h-11"
           />
         </div>
-        
+
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" className="gap-2 h-11 px-4">

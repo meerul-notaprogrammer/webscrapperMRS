@@ -177,6 +177,15 @@ class SupabaseDB:
         except Exception as e:
             logger.error(f"❌ Error fetching categories: {e}")
             return []
+
+    async def get_all_categories(self) -> List[Dict]:
+        """Get all categories (enabled and disabled)"""
+        try:
+            response = self.client.table("categories").select("*").order("code").execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"❌ Error fetching all categories: {e}")
+            return []
     
     async def toggle_category(self, code: str, enabled: bool) -> bool:
         """Enable/disable a category"""

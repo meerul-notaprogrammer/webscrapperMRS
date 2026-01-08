@@ -1,18 +1,48 @@
 """
-ePerolehan Web Scraper using Playwright
+ePerolehan Web Scraper v2.0 - Production Grade
 Scrapes tender data from https://www.eperolehan.gov.my/quotation-tender-notice
+
+Features:
+- Full pagination support (scrapes all pages)
+- Detail page extraction (amount, description, contacts, documents)
+- Rate limiting to avoid IP blocks
+- Robust error handling
+- Progress tracking
 """
 import os
 import json
 import re
-from typing import List, Dict, Any, Optional
+import asyncio
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
-from playwright.async_api import async_playwright, Page, Browser
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 from bs4 import BeautifulSoup
 from loguru import logger
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class ScrapeProgress:
+    """Track scraping progress for real-time updates"""
+    def __init__(self):
+        self.current_page = 0
+        self.total_pages = 0
+        self.tenders_found = 0
+        self.current_tender = ""
+        self.status = "idle"  # idle, scraping_list, scraping_detail, complete, error
+        self.error = None
+    
+    def to_dict(self):
+        return {
+            "current_page": self.current_page,
+            "total_pages": self.total_pages,
+            "tenders_found": self.tenders_found,
+            "current_tender": self.current_tender,
+            "status": self.status,
+            "error": self.error
+        }
+
 
 class EPerolehanScraper:
     def __init__(self):
@@ -20,6 +50,12 @@ class EPerolehanScraper:
         self.tender_url = f"{self.base_url}/quotation-tender-notice"
         self.headless = os.getenv("HEADLESS_BROWSER", "true").lower() == "true"
         self.timeout = int(os.getenv("PAGE_TIMEOUT", "60000"))
+        self.delay_between_pages = float(os.getenv("SCRAPE_DELAY", "2.0"))  # seconds
+        self.max_pages = int(os.getenv("MAX_PAGES", "50"))  # safety limit
+        self.scrape_details = os.getenv("SCRAPE_DETAILS", "true").lower() == "true"
+        
+        # Progress tracking
+        self.progress = ScrapeProgress()
         
         # Parse TAG_KEYWORDS with error handling
         try:
@@ -29,15 +65,34 @@ class EPerolehanScraper:
             logger.warning(f"⚠️ TAG_KEYWORDS JSON parse error: {e}. Using empty dict.")
             self.tag_keywords = {}
         
-        logger.info(f"🔧 Scraper initialized for {self.tender_url}")
+        logger.info(f"🔧 Scraper v2.0 initialized | Headless: {self.headless} | Max Pages: {self.max_pages}")
     
-    async def scrape_all_categories(self) -> List[Dict[str, Any]]:
-        """Scrape all tenders from ePerolehan quotation-tender-notice page"""
+    async def scrape_all_categories(self, progress_callback: Optional[Callable] = None) -> List[Dict[str, Any]]:
+        """
+        Scrape all tenders from ePerolehan with full pagination and detail extraction
+        
+        Args:
+            progress_callback: Optional async function to call with progress updates
+        
+        Returns:
+            List of tender dictionaries
+        """
         all_tenders = []
+        self.progress = ScrapeProgress()
+        self.progress.status = "scraping_list"
         
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=self.headless)
-            page = await browser.new_page()
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            
+            page = await context.new_page()
             
             try:
                 logger.info(f"🔍 Navigating to {self.tender_url}")
@@ -45,34 +100,290 @@ class EPerolehanScraper:
                 await page.wait_for_load_state("networkidle")
                 
                 # Wait for tender table to load
-                await page.wait_for_selector("table", timeout=10000)
+                await page.wait_for_selector("table", timeout=15000)
                 
-                # Get page content
-                content = await page.content()
-                tenders = self._parse_tender_list(content)
+                # Get total pages from pagination
+                self.progress.total_pages = await self._get_total_pages(page)
+                logger.info(f"📊 Total pages detected: {self.progress.total_pages}")
                 
-                logger.info(f"✅ Found {len(tenders)} tenders")
-                all_tenders.extend(tenders)
+                current_page = 1
                 
-                # TODO: Handle pagination if exists
-                # TODO: Click each tender for detailed info
+                while current_page <= min(self.progress.total_pages, self.max_pages):
+                    self.progress.current_page = current_page
+                    self.progress.status = "scraping_list"
+                    
+                    if progress_callback:
+                        await progress_callback(self.progress.to_dict())
+                    
+                    logger.info(f"📄 Scraping page {current_page}/{self.progress.total_pages}...")
+                    
+                    # Get page content
+                    content = await page.content()
+                    page_tenders = self._parse_tender_list(content)
+                    
+                    logger.info(f"   Found {len(page_tenders)} tenders on page {current_page}")
+                    
+                    # Optionally scrape detail pages
+                    if self.scrape_details:
+                        for i, tender in enumerate(page_tenders):
+                            if tender.get('tender_link') and tender['tender_link'] != '#':
+                                self.progress.status = "scraping_detail"
+                                self.progress.current_tender = tender.get('quotation_number', f'Tender {i+1}')
+                                
+                                if progress_callback:
+                                    await progress_callback(self.progress.to_dict())
+                                
+                                try:
+                                    detail = await self._scrape_detail_page(page, tender['tender_link'])
+                                    tender.update(detail)
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Could not scrape detail for {tender.get('quotation_number')}: {e}")
+                    
+                    all_tenders.extend(page_tenders)
+                    self.progress.tenders_found = len(all_tenders)
+                    
+                    # Navigate to next page
+                    if current_page < min(self.progress.total_pages, self.max_pages):
+                        next_clicked = await self._go_to_next_page(page)
+                        if not next_clicked:
+                            logger.info("   No more pages available")
+                            break
+                        
+                        # Rate limiting
+                        await asyncio.sleep(self.delay_between_pages)
+                    
+                    current_page += 1
+                
+                self.progress.status = "complete"
                 
             except Exception as e:
                 logger.error(f"❌ Error scraping tenders: {e}")
+                self.progress.status = "error"
+                self.progress.error = str(e)
+                
             finally:
                 await browser.close()
+        
+        if progress_callback:
+            await progress_callback(self.progress.to_dict())
         
         logger.info(f"🎯 Total tenders scraped: {len(all_tenders)}")
         return all_tenders
     
+    async def _get_total_pages(self, page: Page) -> int:
+        """Extract total pages from pagination element"""
+        try:
+            # Look for pagination text like "Mukasurat 1 / 17"
+            pagination_text = await page.text_content('.pagination-info, .page-info, [class*="pagination"]')
+            if pagination_text:
+                match = re.search(r'(\d+)\s*/\s*(\d+)', pagination_text)
+                if match:
+                    return int(match.group(2))
+            
+            # Alternative: count page buttons
+            page_buttons = await page.query_selector_all('.pagination a, .page-numbers a')
+            if page_buttons:
+                # Get the last numbered button
+                last_page = 1
+                for btn in page_buttons:
+                    text = await btn.text_content()
+                    if text and text.strip().isdigit():
+                        last_page = max(last_page, int(text.strip()))
+                return last_page
+            
+            return 1
+        except:
+            return 1
+    
+    async def _go_to_next_page(self, page: Page) -> bool:
+        """Click next page button, return True if successful"""
+        try:
+            # Try common next button selectors
+            selectors = [
+                'a:has-text(">")',
+                'a:has-text("Next")',
+                '.pagination .next a',
+                'a[rel="next"]',
+                '.page-item:last-child a'
+            ]
+            
+            for selector in selectors:
+                next_btn = await page.query_selector(selector)
+                if next_btn and await next_btn.is_visible():
+                    await next_btn.click()
+                    await page.wait_for_load_state("networkidle")
+                    return True
+            
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ Could not navigate to next page: {e}")
+            return False
+    
+    async def _scrape_detail_page(self, page: Page, url: str) -> Dict[str, Any]:
+        """
+        Navigate to detail page and extract comprehensive information
+        
+        Returns dict with: description, amount, contacts, documents
+        """
+        detail = {
+            'description': None,
+            'amount': None,
+            'ministry_department': None,
+            'ministry_contact': None,
+            'ministry_phone': None,
+            'ministry_email': None,
+            'ministry_address': None,
+            'documents': []
+        }
+        
+        try:
+            # Store current URL to go back
+            current_url = page.url
+            
+            await page.goto(url, timeout=self.timeout)
+            await page.wait_for_load_state("networkidle")
+            
+            content = await page.content()
+            soup = BeautifulSoup(content, 'lxml')
+            
+            # Extract amount (Jumlah Harga Indikatif)
+            detail['amount'] = self._extract_labeled_value(soup, 
+                ['Jumlah Harga Indikatif', 'Harga Indikatif', 'Anggaran Harga'])
+            
+            # Extract description
+            detail['description'] = self._extract_labeled_value(soup, 
+                ['Tajuk Perolehan', 'Perihal', 'Keterangan'])
+            
+            # Extract ministry details
+            detail['ministry_department'] = self._extract_labeled_value(soup, ['PTJ'])
+            
+            # Extract contact info from PEGAWAI UNTUK DIHUBUNGI section
+            contacts = self._extract_contacts(soup)
+            if contacts:
+                detail['ministry_contact'] = contacts.get('name')
+                detail['ministry_phone'] = contacts.get('phone')
+                detail['ministry_email'] = contacts.get('email')
+            
+            # Extract documents from SENARAI DOKUMEN section
+            detail['documents'] = self._extract_documents(soup)
+            
+            # Go back to list
+            await page.goto(current_url, timeout=self.timeout)
+            await page.wait_for_load_state("networkidle")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error scraping detail page {url}: {e}")
+        
+        return detail
+    
+    def _extract_labeled_value(self, soup: BeautifulSoup, labels: List[str]) -> Optional[str]:
+        """Extract value from a label: value pair in the page"""
+        for label in labels:
+            # Try finding in table rows
+            for row in soup.find_all('tr'):
+                cells = row.find_all(['td', 'th'])
+                for i, cell in enumerate(cells):
+                    if label.lower() in cell.get_text(strip=True).lower():
+                        # Get next cell as value
+                        if i + 1 < len(cells):
+                            value = cells[i + 1].get_text(strip=True)
+                            return value if value else None
+            
+            # Try finding in definition lists or divs
+            label_elem = soup.find(['dt', 'label', 'th', 'td'], string=re.compile(label, re.I))
+            if label_elem:
+                value_elem = label_elem.find_next(['dd', 'span', 'td', 'p'])
+                if value_elem:
+                    return value_elem.get_text(strip=True)
+        
+        return None
+    
+    def _extract_contacts(self, soup: BeautifulSoup) -> Optional[Dict[str, str]]:
+        """Extract contact information from PEGAWAI UNTUK DIHUBUNGI section"""
+        contact = {}
+        
+        # Find the contact section
+        section_header = soup.find(['h4', 'h5', 'div'], string=re.compile('PEGAWAI UNTUK DIHUBUNGI', re.I))
+        if not section_header:
+            section_header = soup.find(['h4', 'h5', 'div'], string=re.compile('Contact', re.I))
+        
+        if section_header:
+            # Find the table after the header
+            table = section_header.find_next('table')
+            if table:
+                rows = table.find_all('tr')
+                if len(rows) > 1:  # Skip header row
+                    first_contact = rows[1].find_all('td')
+                    if first_contact:
+                        if len(first_contact) > 0:
+                            contact['name'] = first_contact[0].get_text(strip=True)
+                        if len(first_contact) > 1:
+                            contact['phone'] = first_contact[1].get_text(strip=True)
+                        if len(first_contact) > 3:
+                            # Email might be in 4th column
+                            email_cell = first_contact[3] if len(first_contact) > 3 else first_contact[-1]
+                            email_link = email_cell.find('a')
+                            if email_link:
+                                contact['email'] = email_link.get_text(strip=True)
+                            else:
+                                contact['email'] = email_cell.get_text(strip=True)
+        
+        return contact if contact else None
+    
+    def _extract_documents(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        """Extract document links from SENARAI DOKUMEN section"""
+        documents = []
+        
+        # Find document section
+        doc_header = soup.find(['h4', 'h5', 'div'], string=re.compile('SENARAI DOKUMEN', re.I))
+        if not doc_header:
+            doc_header = soup.find(id=re.compile('dokumen', re.I))
+        
+        if doc_header:
+            # Find the next table or list
+            container = doc_header.find_next(['table', 'ul', 'div'])
+            
+            if container:
+                # Handle table format
+                if container.name == 'table':
+                    for row in container.find_all('tr'):
+                        cells = row.find_all('td')
+                        if cells:
+                            name = cells[0].get_text(strip=True)
+                            link = row.find('a', href=True)
+                            
+                            if name and link:
+                                url = link.get('href', '')
+                                if url and not url.startswith('http'):
+                                    url = self.base_url + url
+                                
+                                documents.append({
+                                    'name': name,
+                                    'url': url,
+                                    'size': None
+                                })
+                
+                # Handle list format
+                elif container.name == 'ul':
+                    for li in container.find_all('li'):
+                        link = li.find('a', href=True)
+                        if link:
+                            url = link.get('href', '')
+                            if url and not url.startswith('http'):
+                                url = self.base_url + url
+                            
+                            documents.append({
+                                'name': link.get_text(strip=True),
+                                'url': url,
+                                'size': None
+                            })
+        
+        return documents
+    
     def _parse_tender_list(self, html: str) -> List[Dict[str, Any]]:
-        """Parse tender list from HTML"""
+        """Parse tender list from HTML table"""
         soup = BeautifulSoup(html, 'lxml')
         tenders = []
-        
-        # Find all tender rows in the table
-        # Based on your screenshot, the table has columns:
-        # Tajuk Perolehan | PTJ | Tarikh Iklan | Tarikh Tutup | Tempoh Sah Laku | Tindakan
         
         table = soup.find('table')
         if not table:
@@ -81,7 +392,7 @@ class EPerolehanScraper:
         
         rows = table.find_all('tr')[1:]  # Skip header row
         
-        for row in rows:
+        for idx, row in enumerate(rows):
             try:
                 cols = row.find_all('td')
                 if len(cols) < 5:
@@ -121,14 +432,25 @@ class EPerolehanScraper:
                 tags = self._auto_tag(title)
                 
                 # Generate quotation number from link or use index
-                quotation_number = self._extract_quotation_number(tender_link, len(tenders))
+                quotation_number = self._extract_quotation_number(tender_link, idx)
                 
                 tender = {
                     "quotation_number": quotation_number,
                     "summary": title,
+                    "description": title,  # Will be updated from detail page
+                    "amount": 0.0,  # Will be updated from detail page
+                    "category_code": "",
+                    "category_name": "",
                     "ministry_name": ptj,
+                    "ministry_department": "",
+                    "ministry_contact": "",
+                    "ministry_phone": "",
+                    "ministry_email": "",
+                    "ministry_location": "",
                     "date_iklan": date_iklan.isoformat() if date_iklan else None,
+                    "date_published": date_iklan.isoformat() if date_iklan else None,
                     "date_closing": date_tutup.isoformat() if date_tutup else None,
+                    "date_briefing": None,
                     "days_remaining": days_remaining,
                     "is_urgent": is_urgent,
                     "tempoh_sah_laku": tempoh_sah_laku,
@@ -149,7 +471,12 @@ class EPerolehanScraper:
     def _extract_quotation_number(self, link: str, index: int) -> str:
         """Extract quotation number from link or generate one"""
         if link:
-            # Try to extract ID from URL
+            # Try patterns like QT25000000012345
+            match = re.search(r'(QT\d+)', link, re.I)
+            if match:
+                return match.group(1).upper()
+            
+            # Try to extract ID from URL query params
             match = re.search(r'[?&]id=([^&]+)', link)
             if match:
                 return match.group(1)
@@ -166,17 +493,19 @@ class EPerolehanScraper:
         """Parse date string to datetime"""
         if not date_str or date_str.strip() == "":
             return None
-            
+        
         try:
-            # Clean the date string
             date_str = date_str.strip()
             
             # Try common Malaysian date formats
             formats = [
                 "%d/%m/%Y %I:%M %p",  # 07/01/2026 12:00 PM
+                "%d/%m/%Y %H:%M",      # 07/01/2026 14:00
                 "%d/%m/%Y",            # 07/01/2026
                 "%d-%m-%Y %I:%M %p",
+                "%d-%m-%Y %H:%M",
                 "%d-%m-%Y",
+                "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d",
                 "%d %b %Y",
                 "%d %B %Y"
@@ -199,17 +528,30 @@ class EPerolehanScraper:
         tags = []
         text_lower = text.lower()
         
-        for tag, keywords in self.tag_keywords.items():
-            if any(keyword.lower() in text_lower for keyword in keywords):
+        # Default keywords if none configured
+        default_keywords = {
+            "IT": ["komputer", "laptop", "server", "perisian", "software", "hardware", "ict"],
+            "Furniture": ["perabot", "meja", "kerusi", "almari", "kabinet"],
+            "Security": ["keselamatan", "cctv", "pengawasan", "kawalan"],
+            "Cleaning": ["pembersihan", "cucian", "cleaning"],
+            "Maintenance": ["penyelenggaraan", "servis", "maintenance"],
+            "Printing": ["cetakan", "printing", "percetakan", "penerbitan"],
+            "Stationery": ["alat tulis", "stationery", "kertas", "pen"],
+            "Electronics": ["elektronik", "elektrik", "electric"],
+        }
+        
+        keywords = self.tag_keywords if self.tag_keywords else default_keywords
+        
+        for tag, keyword_list in keywords.items():
+            if any(keyword.lower() in text_lower for keyword in keyword_list):
                 tags.append(tag)
         
         return tags
     
-    async def scrape_single_tender(self, quotation_number: str) -> Optional[Dict[str, Any]]:
-        """Scrape a single tender by quotation number"""
-        # This would need to be implemented based on the actual tender detail page structure
-        logger.warning("⚠️ scrape_single_tender not yet implemented")
-        return None
+    def get_progress(self) -> Dict[str, Any]:
+        """Get current scraping progress"""
+        return self.progress.to_dict()
+
 
 # Singleton instance
 scraper = EPerolehanScraper()
