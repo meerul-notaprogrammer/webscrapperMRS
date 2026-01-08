@@ -48,7 +48,13 @@ class ScraperScheduler:
                     existing = await db.get_tender_by_quotation(quotation_number)
                     
                     if existing:
-                        # Update existing tender
+                        # Update existing tender, but preserve status if it's not 'available'
+                        # The scraper sets status='available' by default, we don't want to overwrite user's choice
+                        current_status = existing.get("status")
+                        if current_status and current_status != "available":
+                            if "status" in tender_data:
+                                del tender_data["status"]
+                        
                         await db.update_tender(quotation_number, tender_data)
                         updated_count += 1
                     else:
