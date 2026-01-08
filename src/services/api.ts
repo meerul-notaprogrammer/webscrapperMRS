@@ -3,7 +3,9 @@
  * Connects to FastAPI backend
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Use relative URL in production (empty string = same origin via nginx)
+// Only use localhost:8000 for local development
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export interface Tender {
   id: string;
@@ -87,7 +89,7 @@ class ApiService {
     options?: RequestInit
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
-    
+
     try {
       const response = await fetch(url, {
         ...options,
@@ -114,7 +116,7 @@ class ApiService {
     const params = new URLSearchParams();
     if (status) params.append('status', status);
     params.append('limit', limit.toString());
-    
+
     return this.request(`/api/tenders?${params}`);
   }
 
@@ -192,7 +194,7 @@ class ApiService {
     if (categories && categories.length > 0) {
       params.append('categories', categories.join(','));
     }
-    
+
     return this.request(`/api/search?${params}`);
   }
 
